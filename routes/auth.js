@@ -4,30 +4,31 @@ const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
 const db = require('../db')
 
-router.post('/register', async(req,res)=>{
+router.post('/register', async (req, res) => {
+  const { name, phone, password } = req.body   // fixed spelling
 
-    const{ name,phone,passowrd} = req.body
-    if(!name|| !phone || !password){
-        return res.status(400).json({message:'Name, phone and password are required'})
+  if (!name || !phone || !password) {
+    return res.status(400).json({ message: 'Name, phone and password are required' })
+  }
+
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10)
+
+    const [result] = await db.query(
+      'INSERT INTO users (name, phone, password) VALUES (?, ?, ?)',
+      [name, phone, hashedPassword]   // save hashed password
+    )
+
+    res.status(201).json({
+      message: 'Admin user created successfully',
+      id: result.insertId
+    })
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(400).json({ message: 'Phone number already registered' })
     }
-
-    try{
-        const hashedPassword = await bcrypt.hash(password,10)
-        const[result]= await db.query(
-            'INSERT INTO users(name,phone,password)VALUES(?,?,?)',
-            [name,phone,password]
-        )
-
-        res.status(201).json({
-            message: 'Admin user created successfully',
-            id: result.insertId
-        })
-    } catch(err){
-        if(err.code ==='ER_DUP_ENTRY'){
-            return res.status(400).json({message:'Phone number already registered'})
-        }
-        res.status(500).json({message:'Server error:' + err.message})
-    }
+    res.status(500).json({ message: 'Server error: ' + err.message })
+  }
 })
 
 router.post('/login', async(req,res)=>{
