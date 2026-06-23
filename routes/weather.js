@@ -10,7 +10,7 @@ router.get('/', auth, async (req, res) => {
   try {
     const { data } = await axios.get(
       'https://api.openweathermap.org/data/2.5/forecast',
-      { params: { lat, lon, appid: process.env.WEATHER_API_KEY, units: 'metric' } }
+      { timeout: 8000, params: { lat, lon, appid: process.env.WEATHER_API_KEY, units: 'metric' } }
     )
 
     const current = data.list[0]
