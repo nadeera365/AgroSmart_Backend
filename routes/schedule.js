@@ -274,5 +274,30 @@ router.patch('/:id', auth, async (req, res) => {
     res.status(500).json({ message: err.message })
   }
 })
+// ── DELETE /api/schedule/:id ──────────────────────────
+router.delete('/:id', auth, async (req, res) => {
+  try {
+    const [result] = await db.query(
+      'DELETE FROM fertilizer_stages WHERE id = ?',
+      [req.params.id]
+    )
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        message: 'Schedule stage not found'
+      })
+    }
+
+    res.json({
+      message: 'Schedule stage deleted successfully'
+    })
+  } catch (err) {
+    console.error('Delete schedule error:', err)
+
+    res.status(500).json({
+      message: err.message
+    })
+  }
+})
 
 module.exports = router
