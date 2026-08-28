@@ -1,6 +1,8 @@
 const express = require('express')
-const cors    = require('cors')
+const cors = require('cors')
 require('dotenv').config()
+
+const connectMongoDB = require('./mongoDb')
 
 const app = express()
 
@@ -25,12 +27,13 @@ app.get('/', (req, res) => {
 
 
 const PORT = process.env.PORT || 5000
-app.listen(PORT, () => {
-  console.log(`
-  ╔════════════════════════════════╗
-  ║  🌾 AgroSmart Backend Running  ║
-  ║  Port: ${PORT}                    ║
-  ║  http://localhost:${PORT}         ║
-  ╚════════════════════════════════╝
-  `)
-})
+
+async function startServer() {
+  await connectMongoDB()
+
+  app.listen(PORT, () => {
+    console.log(`🌾 AgroSmart Backend running on port ${PORT}`)
+  })
+}
+
+startServer()

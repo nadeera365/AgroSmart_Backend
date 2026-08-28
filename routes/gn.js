@@ -1,80 +1,106 @@
 const express = require('express')
+
+const GNDivision = require('../models/GNDivision')
+const auth = require('../middleware/auth')
+
 const router = express.Router()
-const db = require('../db')
-const auth = require ('../middleware/auth')
 
-//returns list of all 17 DS area names
-router.get('/ds-areas',auth,async(req,res)=>{
-    try{
-        const [rows] = await db.query(
-            `SELECT DISTINCT divisional_secretariat
-            FROM gn_divisions
-            ORDER BY divisional_secretariat`
-        )
-        res.json(rows.map(r=> r.divisional_secretariat))
-    } catch(err){
-        res.status(500).json({message: err.message})
-    }
+// GET /api/gn/ds-areas
+// Return all unique DS area names
+router.get('/ds-areas', auth, async (req, res) => {
+  try {
+    const dsAreas = await GNDivision.distinct(
+      'divisional_secretariat'
+    )
+
+    dsAreas.sort((a, b) =>
+      a.localeCompare(b)
+    )
+
+    res.json(dsAreas)
+  } catch (err) {
+    res.status(500).json({
+      message: err.message
+    })
+  }
 })
 
-router.get('/by-ds/:ds',auth,async (req,res)=>{
-    try{
-        const [rows] = await db.query(
-           `SELECT id, gn_division
-            FROM gn_divisions
-            WHERE divisional_secretariat = ?
-            ORDER BY gn_division`,
-            [req.params.ds] 
-        )
-        res.json(rows)
-    }catch(err){
-        res.status(500).json({message: err.message})
-    }
+// GET /api/gn/by-ds/:ds
+// Return GN divisions belonging to a DS area
+router.get('/by-ds/:ds', auth, async (req, res) => {
+  try {
+    const rows = await GNDivision.find({
+      divisional_secretariat: req.params.ds
+    })
+      .select('_id gn_division')
+      .sort({ gn_division: 1 })
+      .lean()
+
+    const divisions = rows.map(row => ({
+      id: row._id.toString(),
+      gn_division: row.gn_division
+    }))
+
+    res.json(divisions)
+  } catch (err) {
+    res.status(500).json({
+      message: err.message
+    })
+  }
 })
 
+// GET /api/gn/data?ds=...&gn=...
+// Return soil and fertilizer data
 router.get('/data', auth, async (req, res) => {
   const { ds, gn } = req.query
-  
 
   if (!ds || !gn) {
     return res.status(400).json({
-      message: 'Both ds (divisional secretariat) and gn (GN division) are required'
+      message:
+        'Both ds (divisional secretariat) and gn (GN division) are required'
     })
   }
 
   try {
-    const [rows] = await db.query(
-      `SELECT * FROM gn_divisions
-       WHERE divisional_secretariat = ?
-       AND gn_division = ?
-       LIMIT 1`,
-      [ds, gn]
-    )
+    const data = await GNDivision.findOne({
+      divisional_secretariat: ds,
+      gn_division: gn
+    }).lean()
 
-    if (rows.length === 0) {
+    if (!data) {
       return res.status(404).json({
-        message: `No data found for GN: ${gn} in DS: ${ds}`
+        message:
+          `No data found for GN: ${gn} in DS: ${ds}`
       })
     }
 
-    const data = rows[0]
-
-   
     const noFertilizerNeeded =
-      parseFloat(data.irrigated_urea_kg_acre) === 0 &&
-      parseFloat(data.irrigated_tsp_kg_acre)  === 0 &&
-      parseFloat(data.irrigated_mop_kg_acre)  === 0
+      Number(data.irrigated_urea_kg_acre) === 0 &&
+      Number(data.irrigated_tsp_kg_acre) === 0 &&
+      Number(data.irrigated_mop_kg_acre) === 0
+
+    const {
+      _id,
+      __v,
+      legacyId,
+      ...soilData
+    } = data
 
     res.json({
-      ...data,  
-      no_fertilizer_needed: noFertilizerNeeded,
+      id: _id.toString(),
+      ...soilData,
+
+      no_fertilizer_needed:
+        noFertilizerNeeded,
+
       warning: noFertilizerNeeded
         ? 'Soil nutrients are already high in this area. Minimal chemical fertilizer recommended.'
         : null
     })
-
   } catch (err) {
-    res.status(500).json({ message: err.message })
+    res.status(500).json({
+      message: err.message
+    })
   }
 })
 

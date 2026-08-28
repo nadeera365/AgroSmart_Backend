@@ -1,40 +1,78 @@
 const express = require('express')
-const db = require('../db')
+const mongoose = require('mongoose')
+
+const Farmer = require('../models/Farmer')
+const CropCycle = require('../models/CropCycle')
+const FertilizerStage =
+  require('../models/FertilizerStage')
+
 const auth = require('../middleware/auth')
 
 const router = express.Router()
 
-function addDays(dateStr, days) {
-  const d = new Date(dateStr)
-  d.setUTCDate(d.getUTCDate() + days)
-  return d.toISOString().split('T')[0]
+// Convert YYYY-MM-DD into a valid UTC Date
+function parseDateOnly(dateString) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
+    return null
+  }
+
+  const date = new Date(
+    `${dateString}T00:00:00.000Z`
+  )
+
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.toISOString().slice(0, 10) !== dateString
+  ) {
+    return null
+  }
+
+  return date
 }
 
-// Format a date nicely for logging
-function fmtDate(dateStr) {
-  return new Date(dateStr).toLocaleDateString('en-GB', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-    timeZone: 'UTC'
-  })
+// Add days without timezone changes
+function addDays(dateString, days) {
+  const date = parseDateOnly(dateString)
+
+  date.setUTCDate(
+    date.getUTCDate() + days
+  )
+
+  return date.toISOString().slice(0, 10)
 }
 
-function getUreaSplitRatios(totalUreaPerAcre, tspPerAcre) {
-  // Ibulpe DS pattern — total urea is 90 kg/acre
+function fmtDate(date) {
+  return new Date(date).toLocaleDateString(
+    'en-GB',
+    {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      timeZone: 'UTC'
+    }
+  )
+}
+
+// Select the correct Urea distribution pattern
+function getUreaSplitRatios(
+  totalUreaPerAcre,
+  tspPerAcre
+) {
+  // Ibulpe pattern
   if (totalUreaPerAcre >= 80) {
-    return [0, 20, 30, 26, 14] // sums to 90
+    return [0, 20, 30, 26, 14]
   }
 
-  // High TSP areas (TSP >= 14 kg/acre) → use ratio B
+  // High TSP areas
   if (tspPerAcre >= 14) {
-    return [0, 14, 22, 12, 8] // sums to 56
+    return [0, 14, 22, 12, 8]
   }
 
-  // Standard (most GN divisions) → ratio A
-  return [0, 8, 22, 18, 8] // sums to 56
+  // Standard GN divisions
+  return [0, 8, 22, 18, 8]
 }
 
+// Calculate fertilizer schedule
 function calculateStages(
   gnData,
   acres,
@@ -44,73 +82,71 @@ function calculateStages(
   const isIrrigated =
     cultivationType === 'irrigated'
 
-  // ── Read totals from DB (per acre) ──
-  const totalUrea = parseFloat(
-    isIrrigated
-      ? gnData.irrigated_urea_kg_acre
-      : gnData.rainfed_urea_kg_acre
-  ) || 0
+  const totalUrea =
+    Number(
+      isIrrigated
+        ? gnData.irrigated_urea_kg_acre
+        : gnData.rainfed_urea_kg_acre
+    ) || 0
 
-  const totalTSP = parseFloat(
-    isIrrigated
-      ? gnData.irrigated_tsp_kg_acre
-      : gnData.rainfed_tsp_kg_acre
-  ) || 0
+  const totalTSP =
+    Number(
+      isIrrigated
+        ? gnData.irrigated_tsp_kg_acre
+        : gnData.rainfed_tsp_kg_acre
+    ) || 0
 
-  const totalMOP = parseFloat(
-    isIrrigated
-      ? gnData.irrigated_mop_kg_acre
-      : gnData.rainfed_mop_kg_acre
-  ) || 0
+  const totalMOP =
+    Number(
+      isIrrigated
+        ? gnData.irrigated_mop_kg_acre
+        : gnData.rainfed_mop_kg_acre
+    ) || 0
 
   console.log(
-    `\n📊 Fertilizer calculation for GN: ${gnData.gn_division}`
+    `\n📊 Fertilizer calculation for GN: ` +
+    `${gnData.gn_division}`
   )
 
   console.log(
-    `   Type: ${cultivationType} | Acres: ${acres}`
+    `   Type: ${cultivationType} | ` +
+    `Acres: ${acres}`
   )
 
   console.log(
-    `   Per-acre totals → Urea: ${totalUrea}kg | ` +
-    `TSP: ${totalTSP}kg | MOP: ${totalMOP}kg`
+    `   Per-acre totals → ` +
+    `Urea: ${totalUrea}kg | ` +
+    `TSP: ${totalTSP}kg | ` +
+    `MOP: ${totalMOP}kg`
   )
 
-  // ── If this GN has 0 fertilizer recommended ──
   if (
     totalUrea === 0 &&
     totalTSP === 0 &&
     totalMOP === 0
   ) {
-    console.log(
-      '   ⚠️ No fertilizer recommended for this GN division'
-    )
-
     return []
   }
 
-  // ── Urea split ratios ──
   const ureaRatios = getUreaSplitRatios(
     totalUrea,
     totalTSP
   )
 
-  const ureaRatioSum =
-    ureaRatios.reduce(
-      (a, b) => a + b,
-      0
-    )
+  const ratioTotal = ureaRatios.reduce(
+    (sum, value) => sum + value,
+    0
+  )
 
-  // ── Distribute Urea proportionally across stages ──
-  const ureaPerAcreByStage =
-    ureaRatios.map(r =>
-      ureaRatioSum > 0
-        ? (r / ureaRatioSum) * totalUrea
+  const ureaByStage = ureaRatios.map(
+    ratio =>
+      ratioTotal > 0
+        ? (ratio / ratioTotal) * totalUrea
         : 0
-    )
+  )
 
-  // ── TSP: 100% at Basal ──
-  const tspPerAcreByStage = [
+  // TSP: 100% at Basal
+  const tspByStage = [
     totalTSP,
     0,
     0,
@@ -118,26 +154,24 @@ function calculateStages(
     0
   ]
 
-  // ── MOP: split 50/50 between stage 2 and stage 3 ──
-  const mopHalfA = parseFloat(
+  // MOP: 50% Week 5 and 50% Week 7
+  const mopFirstHalf = Number(
     (totalMOP / 2).toFixed(2)
   )
 
-  const mopHalfB = parseFloat(
-    (totalMOP - mopHalfA).toFixed(2)
+  const mopSecondHalf = Number(
+    (totalMOP - mopFirstHalf).toFixed(2)
   )
 
-  const mopPerAcreByStage = [
+  const mopByStage = [
     0,
     0,
-    mopHalfA,
-    mopHalfB,
+    mopFirstHalf,
+    mopSecondHalf,
     0
   ]
 
-  // ── Stage definitions ──
-  // icon values are mapped to react-icons in frontend
-  const STAGES = [
+  const stageDefinitions = [
     {
       index: 0,
       name: 'Basal Application',
@@ -170,81 +204,130 @@ function calculateStages(
     }
   ]
 
-  const stages = STAGES.map((s, i) => {
+  const stages = stageDefinitions.map(
+    (stage, index) => {
+      const urea = Number(
+        (
+          ureaByStage[index] * acres
+        ).toFixed(2)
+      )
 
-    // Multiply per-acre values by actual acres
-    const urea = parseFloat(
-      (
-        ureaPerAcreByStage[i] *
-        acres
-      ).toFixed(2)
-    )
+      const tsp = Number(
+        (
+          tspByStage[index] * acres
+        ).toFixed(2)
+      )
 
-    const tsp = parseFloat(
-      (
-        tspPerAcreByStage[i] *
-        acres
-      ).toFixed(2)
-    )
+      const mop = Number(
+        (
+          mopByStage[index] * acres
+        ).toFixed(2)
+      )
 
-    const mop = parseFloat(
-      (
-        mopPerAcreByStage[i] *
-        acres
-      ).toFixed(2)
-    )
+      const total = Number(
+        (urea + tsp + mop).toFixed(2)
+      )
 
-    const total = parseFloat(
-      (
-        urea +
-        tsp +
-        mop
-      ).toFixed(2)
-    )
+      const scheduledDate = addDays(
+        plantingDate,
+        stage.dap
+      )
 
-    // Original DAP date — no rain checking
-    const scheduledDate = addDays(
-      plantingDate,
-      s.dap
-    )
+      console.log(
+        `   Stage ${stage.index} ` +
+        `(DAP ${stage.dap}) ` +
+        `${fmtDate(scheduledDate)}: ` +
+        `Urea ${urea}kg + ` +
+        `TSP ${tsp}kg + ` +
+        `MOP ${mop}kg = ${total}kg`
+      )
 
-    console.log(
-      `   Stage ${s.index} ` +
-      `(DAP ${s.dap}) ` +
-      `${fmtDate(scheduledDate)}: ` +
-      `Urea ${urea}kg + ` +
-      `TSP ${tsp}kg + ` +
-      `MOP ${mop}kg = ` +
-      `${total}kg`
-    )
-
-    return {
-      stage_index: s.index,
-      stage_name: s.name,
-      stage_icon: s.icon,
-      date: scheduledDate,
-      days_after: s.dap,
-      urea_kg: urea,
-      tsp_kg: tsp,
-      mop_kg: mop,
-      total_kg: total
+      return {
+        stage_index: stage.index,
+        stage_name: stage.name,
+        stage_icon: stage.icon,
+        scheduled_date: scheduledDate,
+        days_after: stage.dap,
+        urea_kg: urea,
+        tsp_kg: tsp,
+        mop_kg: mop,
+        total_kg: total
+      }
     }
-  })
+  )
 
-  // Remove stages with nothing to apply
+  // Do not save empty stages
   return stages.filter(
-    s => s.total_kg > 0
+    stage => stage.total_kg > 0
   )
 }
 
+// Keep API response compatible with frontend
+function formatStage(stage) {
+  const populatedFarmer =
+    stage.farmer_id &&
+    stage.farmer_id._id
 
-// ══════════════════════════════════════════════════════════════
+  const farmer = populatedFarmer
+    ? stage.farmer_id
+    : null
+
+  const farmerId = populatedFarmer
+    ? farmer._id
+    : stage.farmer_id
+
+  const cycleId =
+    stage.cycle_id &&
+    stage.cycle_id._id
+      ? stage.cycle_id._id
+      : stage.cycle_id
+
+  return {
+    id: stage._id.toString(),
+
+    cycle_id: cycleId
+      ? cycleId.toString()
+      : null,
+
+    farmer_id: farmerId
+      ? farmerId.toString()
+      : null,
+
+    stage_index: stage.stage_index,
+    stage_name: stage.stage_name,
+    stage_icon: stage.stage_icon,
+
+    scheduled_date: stage.scheduled_date,
+    days_after: stage.days_after,
+
+    urea_kg: stage.urea_kg,
+    tsp_kg: stage.tsp_kg,
+    mop_kg: stage.mop_kg,
+    total_kg: stage.total_kg,
+
+    status: stage.status,
+    rescheduled: stage.rescheduled,
+    original_date: stage.original_date,
+
+    farmer_name:
+      farmer?.name,
+
+    farmer_phone:
+      farmer?.phone,
+
+    gn_division:
+      farmer?.gn_division,
+
+    ds_area:
+      farmer?.ds_area,
+
+    created_at:
+      stage.createdAt
+  }
+}
+
 // POST /api/schedule
-// Create a new crop cycle + stages
-// ══════════════════════════════════════════════════════════════
-
 router.post('/', auth, async (req, res) => {
-
   const {
     farmer_id,
     planting_date
@@ -257,79 +340,57 @@ router.post('/', auth, async (req, res) => {
     })
   }
 
-  // Validate date format
-  if (
-    !/^\d{4}-\d{2}-\d{2}$/.test(
-      planting_date
-    )
-  ) {
+  if (!mongoose.isValidObjectId(farmer_id)) {
+    return res.status(400).json({
+      message: 'Invalid farmer_id'
+    })
+  }
+
+  const parsedPlantingDate =
+    parseDateOnly(planting_date)
+
+  if (!parsedPlantingDate) {
     return res.status(400).json({
       message:
-        'planting_date must be YYYY-MM-DD format'
+        'planting_date must be a valid YYYY-MM-DD date'
     })
   }
 
   try {
+    const farmer = await Farmer.findById(
+      farmer_id
+    ).populate('gn_id')
 
-    // ── 1. Get farmer ──
-    const [farmers] =
-      await db.query(
-        'SELECT * FROM farmers WHERE id = ?',
-        [farmer_id]
-      )
-
-    if (farmers.length === 0) {
+    if (!farmer) {
       return res.status(404).json({
         message: 'Farmer not found'
       })
     }
 
-    const farmer = farmers[0]
-
-
-    // ── 2. Check farmer has GN division ──
     if (!farmer.gn_id) {
       return res.status(400).json({
         message:
           `Farmer "${farmer.name}" has no GN division linked. ` +
-          `The GN division "${farmer.gn_division}" in ${farmer.ds_area} ` +
-          `may not match the database. Please re-register the farmer.`
+          `Please re-register the farmer.`
       })
     }
 
+    const gnData = farmer.gn_id
 
-    // ── 3. Get soil/fertilizer data ──
-    const [gnRows] =
-      await db.query(
-        'SELECT * FROM gn_divisions WHERE id = ?',
-        [farmer.gn_id]
-      )
-
-    if (gnRows.length === 0) {
-      return res.status(404).json({
-        message:
-          `Soil data not found for GN ID ${farmer.gn_id}. ` +
-          `Check your database import.`
-      })
-    }
-
-    const gnData = gnRows[0]
-
-
-    // ── 4. Calculate fertilizer stages ──
     const stages = calculateStages(
       gnData,
-      parseFloat(farmer.acres),
+      Number(farmer.acres),
       planting_date,
       farmer.cultivation_type
     )
 
     if (stages.length === 0) {
       return res.status(400).json({
-
         message:
-          `No fertilizer recommended for ${gnData.gn_division} ` +
-          `(${farmer.ds_area}). Soil nutrients are already sufficient in this area.`,
+          `No fertilizer recommended for ` +
+          `${gnData.gn_division} ` +
+          `(${farmer.ds_area}). ` +
+          `Soil nutrients are already sufficient in this area.`,
 
         soil_data: {
           gn_division:
@@ -344,145 +405,151 @@ router.post('/', auth, async (req, res) => {
       })
     }
 
+    let newCycle
+    let savedStages
 
-    // ── 5. Check existing active cycle ──
-    const [existingCycles] =
-      await db.query(
-        `SELECT id
-         FROM crop_cycles
-         WHERE farmer_id = ?
-         AND status = 'active'`,
-        [farmer_id]
-      )
+    // Save cycle and stages atomically
+    await mongoose.connection.transaction(
+      async session => {
+        // Complete previous active cycles
+        await CropCycle.updateMany(
+          {
+            farmer_id: farmer._id,
+            status: 'active'
+          },
+          {
+            $set: {
+              status: 'completed'
+            }
+          },
+          {
+            session
+          }
+        )
 
-    if (existingCycles.length > 0) {
+        const createdCycles =
+          await CropCycle.create(
+            [
+              {
+                farmer_id: farmer._id,
+                planting_date:
+                  parsedPlantingDate,
+                status: 'active'
+              }
+            ],
+            {
+              session
+            }
+          )
 
-      // Mark old cycle as completed
-      await db.query(
-        `UPDATE crop_cycles
-         SET status = 'completed'
-         WHERE farmer_id = ?
-         AND status = 'active'`,
-        [farmer_id]
-      )
+        newCycle = createdCycles[0]
 
-      console.log(
-        `ℹ️ Previous active cycle for farmer ${farmer_id} marked as completed`
-      )
-    }
+        const stageDocuments = stages.map(
+          stage => ({
+            cycle_id: newCycle._id,
+            farmer_id: farmer._id,
 
+            stage_index:
+              stage.stage_index,
 
-    // ── 6. Save crop cycle ──
-    const [cycleResult] =
-      await db.query(
-        `INSERT INTO crop_cycles
-         (farmer_id, planting_date)
-         VALUES (?, ?)`,
-        [
-          farmer_id,
-          planting_date
-        ]
-      )
+            stage_name:
+              stage.stage_name,
 
-    const cycle_id =
-      cycleResult.insertId
+            stage_icon:
+              stage.stage_icon,
 
+            scheduled_date:
+              parseDateOnly(
+                stage.scheduled_date
+              ),
 
-    // ── 7. Save fertilizer stages ──
-    for (const stage of stages) {
+            days_after:
+              stage.days_after,
 
-      await db.query(
-        `INSERT INTO fertilizer_stages
-         (
-           cycle_id,
-           farmer_id,
-           stage_index,
-           stage_name,
-           stage_icon,
-           scheduled_date,
-           days_after,
-           urea_kg,
-           tsp_kg,
-           mop_kg,
-           total_kg
-         )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          cycle_id,
-          farmer_id,
-          stage.stage_index,
-          stage.stage_name,
-          stage.stage_icon,
-          stage.date,
-          stage.days_after,
-          stage.urea_kg,
-          stage.tsp_kg,
-          stage.mop_kg,
-          stage.total_kg
-        ]
-      )
-    }
+            urea_kg:
+              stage.urea_kg,
 
+            tsp_kg:
+              stage.tsp_kg,
 
-    // ── 8. Mark farmer as active ──
-    await db.query(
-      `UPDATE farmers
-       SET active_cycle = TRUE
-       WHERE id = ?`,
-      [farmer_id]
+            mop_kg:
+              stage.mop_kg,
+
+            total_kg:
+              stage.total_kg,
+
+            status: 'pending',
+            rescheduled: false,
+            original_date: null
+          })
+        )
+
+        savedStages =
+          await FertilizerStage.insertMany(
+            stageDocuments,
+            {
+              session
+            }
+          )
+
+        await Farmer.updateOne(
+          {
+            _id: farmer._id
+          },
+          {
+            $set: {
+              active_cycle: true
+            }
+          },
+          {
+            session
+          }
+        )
+      }
     )
 
-
-    // ── 9. Build summary totals ──
-    const totalUrea =
+    const totalUrea = Number(
       stages
         .reduce(
-          (s, x) =>
-            s + x.urea_kg,
+          (sum, stage) =>
+            sum + stage.urea_kg,
           0
         )
         .toFixed(2)
+    )
 
-    const totalTSP =
+    const totalTSP = Number(
       stages
         .reduce(
-          (s, x) =>
-            s + x.tsp_kg,
+          (sum, stage) =>
+            sum + stage.tsp_kg,
           0
         )
         .toFixed(2)
+    )
 
-    const totalMOP =
+    const totalMOP = Number(
       stages
         .reduce(
-          (s, x) =>
-            s + x.mop_kg,
+          (sum, stage) =>
+            sum + stage.mop_kg,
           0
         )
         .toFixed(2)
-
+    )
 
     console.log(
       `\n✅ Schedule created: ` +
-      `cycle_id=${cycle_id}, ` +
-      `${stages.length} stages`
+      `cycle_id=${newCycle._id}, ` +
+      `${savedStages.length} stages`
     )
 
-    console.log(
-      `   Season totals → ` +
-      `Urea: ${totalUrea}kg | ` +
-      `TSP: ${totalTSP}kg | ` +
-      `MOP: ${totalMOP}kg`
-    )
-
-
-    // ── 10. Response ──
     res.status(201).json({
-
       message:
         'Schedule created successfully',
 
-      cycle_id,
+      cycle_id:
+        newCycle._id.toString(),
 
       farmer_name:
         farmer.name,
@@ -496,36 +563,27 @@ router.post('/', auth, async (req, res) => {
         gnData.gn_division,
 
       stages_count:
-        stages.length,
+        savedStages.length,
 
       season_totals: {
-        urea_kg:
-          parseFloat(totalUrea),
-
-        tsp_kg:
-          parseFloat(totalTSP),
-
-        mop_kg:
-          parseFloat(totalMOP)
+        urea_kg: totalUrea,
+        tsp_kg: totalTSP,
+        mop_kg: totalMOP
       },
 
-      stages:
-        stages.map(s => ({
-          ...s,
-          scheduled_date: s.date
-        })),
+      stages: savedStages.map(
+        formatStage
+      ),
 
       soil_warning:
-        (
-          gnData.phosphorus_status === 'High' ||
-          gnData.potassium_status === 'High'
-        )
-          ? `High nutrient levels detected in ${gnData.gn_division}. Monitor crop response.`
+        gnData.phosphorus_status === 'High' ||
+        gnData.potassium_status === 'High'
+          ? `High nutrient levels detected in ` +
+            `${gnData.gn_division}. ` +
+            `Monitor crop response.`
           : null
     })
-
   } catch (err) {
-
     console.error(
       '❌ Schedule creation error:',
       err
@@ -537,168 +595,31 @@ router.post('/', auth, async (req, res) => {
   }
 })
 
-
-// ══════════════════════════════════════════════════════════════
 // GET /api/schedule/farmer/:id
-// All stages for one farmer
-// ══════════════════════════════════════════════════════════════
-
 router.get(
   '/farmer/:id',
   auth,
   async (req, res) => {
-
-    try {
-
-      const [rows] =
-        await db.query(
-          `SELECT *
-           FROM fertilizer_stages
-           WHERE farmer_id = ?
-           ORDER BY scheduled_date ASC`,
-          [req.params.id]
-        )
-
-      res.json(rows)
-
-    } catch (err) {
-
-      res.status(500).json({
-        message: err.message
-      })
-    }
-  }
-)
-
-
-// ══════════════════════════════════════════════════════════════
-// GET /api/schedule
-// All stages
-// ══════════════════════════════════════════════════════════════
-
-router.get(
-  '/',
-  auth,
-  async (req, res) => {
-
-    try {
-
-      const [rows] =
-        await db.query(
-          `SELECT
-             fs.*,
-             f.name AS farmer_name,
-             f.phone AS farmer_phone,
-             f.gn_division,
-             f.ds_area
-           FROM fertilizer_stages fs
-           JOIN farmers f
-             ON fs.farmer_id = f.id
-           ORDER BY
-             fs.farmer_id ASC,
-             fs.scheduled_date ASC
-           LIMIT 500`
-        )
-
-      res.json(rows)
-
-    } catch (err) {
-
-      res.status(500).json({
-        message: err.message
-      })
-    }
-  }
-)
-
-
-// ══════════════════════════════════════════════════════════════
-// PATCH /api/schedule/:id
-// Update stage status
-// ══════════════════════════════════════════════════════════════
-
-router.patch(
-  '/:id',
-  auth,
-  async (req, res) => {
-
-    const { status } = req.body
-
-    const allowed = [
-      'pending',
-      'applied',
-      'rescheduled'
-    ]
-
-    if (!allowed.includes(status)) {
+    if (
+      !mongoose.isValidObjectId(req.params.id)
+    ) {
       return res.status(400).json({
-        message:
-          `status must be one of: ${allowed.join(', ')}`
+        message: 'Invalid farmer ID'
       })
     }
 
     try {
-
-      await db.query(
-        `UPDATE fertilizer_stages
-         SET status = ?
-         WHERE id = ?`,
-        [
-          status,
-          req.params.id
-        ]
-      )
-
-      res.json({
-        message:
-          'Stage status updated',
-
-        status
-      })
-
-    } catch (err) {
-
-      res.status(500).json({
-        message: err.message
-      })
-    }
-  }
-)
-
-
-// ══════════════════════════════════════════════════════════════
-// DELETE /api/schedule/:id
-// Delete one stage
-// ══════════════════════════════════════════════════════════════
-
-router.delete(
-  '/:id',
-  auth,
-  async (req, res) => {
-
-    try {
-
-      const [result] =
-        await db.query(
-          `DELETE FROM fertilizer_stages
-           WHERE id = ?`,
-          [req.params.id]
-        )
-
-      if (result.affectedRows === 0) {
-        return res.status(404).json({
-          message:
-            'Stage not found'
+      const stages =
+        await FertilizerStage.find({
+          farmer_id: req.params.id
         })
-      }
+          .sort({ scheduled_date: 1 })
+          .lean()
 
-      res.json({
-        message:
-          'Stage deleted successfully'
-      })
-
+      res.json(
+        stages.map(formatStage)
+      )
     } catch (err) {
-
       res.status(500).json({
         message: err.message
       })
@@ -706,83 +627,79 @@ router.delete(
   }
 )
 
-
-// ══════════════════════════════════════════════════════════════
 // GET /api/schedule/debug/:farmer_id
-// Verify calculations
-// ══════════════════════════════════════════════════════════════
-
 router.get(
   '/debug/:farmer_id',
   auth,
   async (req, res) => {
+    const { farmer_id } = req.params
+
+    if (!mongoose.isValidObjectId(farmer_id)) {
+      return res.status(400).json({
+        message: 'Invalid farmer ID'
+      })
+    }
 
     try {
+      const farmer = await Farmer.findById(
+        farmer_id
+      ).populate('gn_id')
 
-      const [farmers] =
-        await db.query(
-          'SELECT * FROM farmers WHERE id = ?',
-          [req.params.farmer_id]
-        )
-
-      if (farmers.length === 0) {
+      if (!farmer) {
         return res.status(404).json({
-          message:
-            'Farmer not found'
+          message: 'Farmer not found'
         })
       }
 
-      const farmer =
-        farmers[0]
+      const gn = farmer.gn_id || null
 
-
-      const [gnRows] =
-        farmer.gn_id
-          ? await db.query(
-              `SELECT *
-               FROM gn_divisions
-               WHERE id = ?`,
-              [farmer.gn_id]
-            )
-          : [[]]
-
-      const gn =
-        gnRows?.[0] || null
-
-
-      const [stages] =
-        await db.query(
-          `SELECT *
-           FROM fertilizer_stages
-           WHERE farmer_id = ?
-           ORDER BY scheduled_date ASC`,
-          [req.params.farmer_id]
-        )
-
+      const stages =
+        await FertilizerStage.find({
+          farmer_id: farmer._id
+        })
+          .sort({ scheduled_date: 1 })
+          .lean()
 
       const isIrrigated =
         farmer.cultivation_type ===
         'irrigated'
 
+      const ureaPerAcre = gn
+        ? Number(
+            isIrrigated
+              ? gn.irrigated_urea_kg_acre
+              : gn.rainfed_urea_kg_acre
+          ) || 0
+        : 0
+
+      const tspPerAcre = gn
+        ? Number(
+            isIrrigated
+              ? gn.irrigated_tsp_kg_acre
+              : gn.rainfed_tsp_kg_acre
+          ) || 0
+        : 0
+
+      const mopPerAcre = gn
+        ? Number(
+            isIrrigated
+              ? gn.irrigated_mop_kg_acre
+              : gn.rainfed_mop_kg_acre
+          ) || 0
+        : 0
 
       res.json({
-
         farmer: {
-
-          id:
-            farmer.id,
-
-          name:
-            farmer.name,
-
-          acres:
-            farmer.acres,
+          id: farmer._id.toString(),
+          name: farmer.name,
+          acres: farmer.acres,
 
           cultivation_type:
             farmer.cultivation_type,
 
-          gn_id:
-            farmer.gn_id,
+          gn_id: gn
+            ? gn._id.toString()
+            : null,
 
           gn_division:
             farmer.gn_division,
@@ -790,16 +707,13 @@ router.get(
           ds_area:
             farmer.ds_area,
 
-          gn_id_status:
-            farmer.gn_id
-              ? 'linked'
-              : 'NULL — schedule will fail'
+          gn_id_status: gn
+            ? 'linked'
+            : 'NULL — schedule will fail'
         },
-
 
         soil_data: gn
           ? {
-
               gn_division:
                 gn.gn_division,
 
@@ -835,75 +749,50 @@ router.get(
 
               rainfed_mop_kg_acre:
                 gn.rainfed_mop_kg_acre
-
             }
-          : 'NO SOIL DATA — gn_id is null or not in gn_divisions table',
-
+          : 'NO SOIL DATA',
 
         what_will_be_used: gn
           ? {
-
               type:
                 farmer.cultivation_type,
 
               urea_per_acre:
-                isIrrigated
-                  ? gn.irrigated_urea_kg_acre
-                  : gn.rainfed_urea_kg_acre,
+                ureaPerAcre,
 
               tsp_per_acre:
-                isIrrigated
-                  ? gn.irrigated_tsp_kg_acre
-                  : gn.rainfed_tsp_kg_acre,
+                tspPerAcre,
 
               mop_per_acre:
-                isIrrigated
-                  ? gn.irrigated_mop_kg_acre
-                  : gn.rainfed_mop_kg_acre,
+                mopPerAcre,
 
               for_acres:
                 farmer.acres,
 
               total_urea:
                 (
-                  (
-                    isIrrigated
-                      ? gn.irrigated_urea_kg_acre
-                      : gn.rainfed_urea_kg_acre
-                  ) *
+                  ureaPerAcre *
                   farmer.acres
                 ).toFixed(2) + ' kg',
 
               total_tsp:
                 (
-                  (
-                    isIrrigated
-                      ? gn.irrigated_tsp_kg_acre
-                      : gn.rainfed_tsp_kg_acre
-                  ) *
+                  tspPerAcre *
                   farmer.acres
                 ).toFixed(2) + ' kg',
 
               total_mop:
                 (
-                  (
-                    isIrrigated
-                      ? gn.irrigated_mop_kg_acre
-                      : gn.rainfed_mop_kg_acre
-                  ) *
+                  mopPerAcre *
                   farmer.acres
                 ).toFixed(2) + ' kg'
-
             }
           : null,
 
-
         stages_in_db:
-          stages
+          stages.map(formatStage)
       })
-
     } catch (err) {
-
       res.status(500).json({
         message: err.message
       })
@@ -911,5 +800,119 @@ router.get(
   }
 )
 
+// GET /api/schedule
+router.get('/', auth, async (req, res) => {
+  try {
+    const stages =
+      await FertilizerStage.find()
+        .populate(
+          'farmer_id',
+          'name phone gn_division ds_area'
+        )
+        .sort({
+          farmer_id: 1,
+          scheduled_date: 1
+        })
+        .limit(500)
+        .lean()
+
+    res.json(
+      stages.map(formatStage)
+    )
+  } catch (err) {
+    res.status(500).json({
+      message: err.message
+    })
+  }
+})
+
+// PATCH /api/schedule/:id
+router.patch('/:id', auth, async (req, res) => {
+  const { status } = req.body
+
+  const allowed = [
+    'pending',
+    'applied',
+    'rescheduled'
+  ]
+
+  if (!allowed.includes(status)) {
+    return res.status(400).json({
+      message:
+        `status must be one of: ` +
+        `${allowed.join(', ')}`
+    })
+  }
+
+  if (!mongoose.isValidObjectId(req.params.id)) {
+    return res.status(400).json({
+      message: 'Invalid stage ID'
+    })
+  }
+
+  try {
+    const stage =
+      await FertilizerStage.findByIdAndUpdate(
+        req.params.id,
+        {
+          $set: {
+            status,
+
+            rescheduled:
+              status === 'rescheduled'
+          }
+        },
+        {
+          new: true,
+          runValidators: true
+        }
+      )
+
+    if (!stage) {
+      return res.status(404).json({
+        message: 'Stage not found'
+      })
+    }
+
+    res.json({
+      message: 'Stage status updated',
+      status: stage.status
+    })
+  } catch (err) {
+    res.status(500).json({
+      message: err.message
+    })
+  }
+})
+
+// DELETE /api/schedule/:id
+router.delete('/:id', auth, async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) {
+    return res.status(400).json({
+      message: 'Invalid stage ID'
+    })
+  }
+
+  try {
+    const stage =
+      await FertilizerStage.findByIdAndDelete(
+        req.params.id
+      )
+
+    if (!stage) {
+      return res.status(404).json({
+        message: 'Stage not found'
+      })
+    }
+
+    res.json({
+      message: 'Stage deleted successfully'
+    })
+  } catch (err) {
+    res.status(500).json({
+      message: err.message
+    })
+  }
+})
 
 module.exports = router

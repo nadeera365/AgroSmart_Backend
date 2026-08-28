@@ -1,128 +1,236 @@
 const express = require('express')
-const router  = express.Router()
-const db      = require('../db')
-const auth    = require('../middleware/auth')
+const mongoose = require('mongoose')
 
+const Farmer = require('../models/Farmer')
+const GNDivision = require('../models/GNDivision')
+const auth = require('../middleware/auth')
+
+const router = express.Router()
+
+function formatFarmer(farmer) {
+  const gn = farmer.gn_id || {}
+
+  return {
+    id: farmer._id.toString(),
+    name: farmer.name,
+    phone: farmer.phone,
+    nic: farmer.nic,
+    ds_area: farmer.ds_area,
+    gn_division: farmer.gn_division,
+
+    gn_id: gn._id
+      ? gn._id.toString()
+      : null,
+
+    acres: farmer.acres,
+    cultivation_type: farmer.cultivation_type,
+    active_cycle: farmer.active_cycle,
+
+    created_at: farmer.createdAt,
+
+    soil_ph: gn.soil_ph,
+    ph_status: gn.ph_status,
+
+    ec_ds_m: gn.ec_ds_m,
+    salinity_status: gn.salinity_status,
+
+    phosphorus_mg_kg:
+      gn.phosphorus_mg_kg,
+
+    phosphorus_status:
+      gn.phosphorus_status,
+
+    potassium_mg_kg:
+      gn.potassium_mg_kg,
+
+    potassium_status:
+      gn.potassium_status,
+
+    organic_matter_pct:
+      gn.organic_matter_pct,
+
+    organic_matter_status:
+      gn.organic_matter_status,
+
+    irrigated_urea_kg_acre:
+      gn.irrigated_urea_kg_acre,
+
+    irrigated_tsp_kg_acre:
+      gn.irrigated_tsp_kg_acre,
+
+    irrigated_mop_kg_acre:
+      gn.irrigated_mop_kg_acre,
+
+    rainfed_urea_kg_acre:
+      gn.rainfed_urea_kg_acre,
+
+    rainfed_tsp_kg_acre:
+      gn.rainfed_tsp_kg_acre,
+
+    rainfed_mop_kg_acre:
+      gn.rainfed_mop_kg_acre
+  }
+}
+
+// GET /api/farmers
 router.get('/', auth, async (req, res) => {
   try {
-    const [rows] = await db.query(`
-      SELECT
-        f.id,
-        f.name,
-        f.phone,
-        f.nic,
-        f.ds_area,
-        f.gn_division,
-        f.acres,
-        f.cultivation_type,
-        f.active_cycle,
-        f.created_at,
-        g.soil_ph,
-        g.ph_status,
-        g.ec_ds_m,
-        g.salinity_status,
-        g.phosphorus_mg_kg,
-        g.phosphorus_status,
-        g.potassium_mg_kg,
-        g.potassium_status,
-        g.organic_matter_pct,
-        g.organic_matter_status,
-        g.irrigated_urea_kg_acre,
-        g.irrigated_tsp_kg_acre,
-        g.irrigated_mop_kg_acre,
-        g.rainfed_urea_kg_acre,
-        g.rainfed_tsp_kg_acre,
-        g.rainfed_mop_kg_acre
-      FROM farmers f
-      LEFT JOIN gn_divisions g ON f.gn_id = g.id
-      ORDER BY f.created_at DESC
-    `)
-   
-    res.json(rows)
+    const farmers = await Farmer.find()
+      .populate('gn_id')
+      .sort({ createdAt: -1 })
+
+    res.json(
+      farmers.map(formatFarmer)
+    )
   } catch (err) {
-    res.status(500).json({ message: err.message })
+    res.status(500).json({
+      message: err.message
+    })
   }
 })
 
+// GET /api/farmers/:id
 router.get('/:id', auth, async (req, res) => {
-  try {
-    const [rows] = await db.query(`
-      SELECT
-        f.*,
-        g.soil_ph, g.ph_status,
-        g.ec_ds_m, g.salinity_status,
-        g.phosphorus_mg_kg, g.phosphorus_status,
-        g.potassium_mg_kg, g.potassium_status,
-        g.organic_matter_pct, g.organic_matter_status,
-        g.irrigated_urea_kg_acre, g.irrigated_tsp_kg_acre, g.irrigated_mop_kg_acre,
-        g.rainfed_urea_kg_acre, g.rainfed_tsp_kg_acre, g.rainfed_mop_kg_acre
-      FROM farmers f
-      LEFT JOIN gn_divisions g ON f.gn_id = g.id
-      WHERE f.id = ?
-    `, [req.params.id])
-
-    if (rows.length === 0) {
-      return res.status(404).json({ message: 'Farmer not found' })
-    }
-
-    res.json(rows[0])
-  } catch (err) {
-    res.status(500).json({ message: err.message })
-  }
-})
-
-router.post('/', auth, async (req, res) => {
-  const { name, phone, nic, ds_area, gn_division, acres, cultivation_type } = req.body
-
-  // Validate required fields
-  if (!name || !phone || !ds_area || !gn_division || !acres) {
+  if (!mongoose.isValidObjectId(req.params.id)) {
     return res.status(400).json({
-      message: 'Name, phone, DS area, GN division and acres are required'
+      message: 'Invalid farmer ID'
     })
   }
 
   try {
-    // Find the gn_id by matching ds_area + gn_division
-    // This links the farmer to your CSV data row
-    const [gnRows] = await db.query(
-      `SELECT id FROM gn_divisions
-       WHERE divisional_secretariat = ?
-       AND gn_division = ?
-       LIMIT 1`,
-      [ds_area, gn_division]
-    )
+    const farmer = await Farmer.findById(
+      req.params.id
+    ).populate('gn_id')
 
-    // gn_id links farmer to your CSV soil data
-    const gn_id = gnRows.length > 0 ? gnRows[0].id : null
+    if (!farmer) {
+      return res.status(404).json({
+        message: 'Farmer not found'
+      })
+    }
 
-    // Insert farmer into database
-    const [result] = await db.query(
-      `INSERT INTO farmers
-         (name, phone, nic, ds_area, gn_division, gn_id, acres, cultivation_type)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [name, phone, nic || null, ds_area, gn_division, gn_id, acres, cultivation_type || 'irrigated']
-    )
+    res.json(formatFarmer(farmer))
+  } catch (err) {
+    res.status(500).json({
+      message: err.message
+    })
+  }
+})
+
+// POST /api/farmers
+router.post('/', auth, async (req, res) => {
+  const {
+    name,
+    phone,
+    nic,
+    ds_area,
+    gn_division,
+    acres,
+    cultivation_type
+  } = req.body
+
+  if (
+    !name ||
+    !phone ||
+    !ds_area ||
+    !gn_division ||
+    acres === undefined ||
+    acres === null
+  ) {
+    return res.status(400).json({
+      message:
+        'Name, phone, DS area, GN division and acres are required'
+    })
+  }
+
+  const numericAcres = Number(acres)
+
+  if (
+    !Number.isFinite(numericAcres) ||
+    numericAcres <= 0
+  ) {
+    return res.status(400).json({
+      message:
+        'Acres must be a number greater than 0'
+    })
+  }
+
+  try {
+    const gnData = await GNDivision.findOne({
+      divisional_secretariat: ds_area,
+      gn_division
+    })
+
+    if (!gnData) {
+      return res.status(400).json({
+        message:
+          `No GN data found for ${gn_division} in ${ds_area}`
+      })
+    }
+
+    const farmer = await Farmer.create({
+      name: name.trim(),
+      phone: phone.trim(),
+      nic: nic?.trim() || null,
+      ds_area,
+      gn_division,
+      gn_id: gnData._id,
+      acres: numericAcres,
+      cultivation_type:
+        cultivation_type || 'irrigated'
+    })
 
     res.status(201).json({
-      message: `Farmer ${name} registered successfully`,
-      id: result.insertId,
-      gn_id
-    })
+      message:
+        `Farmer ${farmer.name} registered successfully`,
 
+      id: farmer._id.toString(),
+      gn_id: gnData._id.toString()
+    })
   } catch (err) {
-    if (err.code === 'ER_DUP_ENTRY') {
-      return res.status(400).json({ message: 'This phone number is already registered' })
+    if (err.code === 11000) {
+      return res.status(400).json({
+        message:
+          'This phone number is already registered'
+      })
     }
-    res.status(500).json({ message: err.message })
+
+    if (err.name === 'ValidationError') {
+      return res.status(400).json({
+        message: err.message
+      })
+    }
+
+    res.status(500).json({
+      message: err.message
+    })
   }
 })
 
+// DELETE /api/farmers/:id
 router.delete('/:id', auth, async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) {
+    return res.status(400).json({
+      message: 'Invalid farmer ID'
+    })
+  }
+
   try {
-    await db.query('DELETE FROM farmers WHERE id = ?', [req.params.id])
-    res.json({ message: 'Farmer deleted successfully' })
+    const farmer =
+      await Farmer.findByIdAndDelete(req.params.id)
+
+    if (!farmer) {
+      return res.status(404).json({
+        message: 'Farmer not found'
+      })
+    }
+
+    res.json({
+      message: 'Farmer deleted successfully'
+    })
   } catch (err) {
-    res.status(500).json({ message: err.message })
+    res.status(500).json({
+      message: err.message
+    })
   }
 })
 
